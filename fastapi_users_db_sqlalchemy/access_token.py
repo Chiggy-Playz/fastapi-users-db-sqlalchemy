@@ -2,7 +2,13 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, Generic, Optional, Type
 
-from fastapi_users.authentication.strategy.db import AP, AccessTokenDatabase
+from fastapi_users.authentication.strategy.db import AP, APE, AccessRefreshTokenDatabase, AccessTokenDatabase
+from fastapi_users.authentication.strategy.db.adapter import BaseAccessTokenDatabase
+from fastapi_users.authentication.strategy.db.models import (
+    AccessRefreshTokenProtocol,
+    AccessTokenProtocol,
+)
+
 from fastapi_users.models import ID
 from sqlalchemy import ForeignKey, String, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +33,16 @@ class SQLAlchemyBaseAccessTokenTable(Generic[ID]):
         )
 
 
+class SQLAlchemyBaseAccessRefreshTokenTable(SQLAlchemyBaseAccessTokenTable[ID]):
+
+    __tablename__ = "accessrefreshtoken"
+
+    if TYPE_CHECKING:  # pragma: no cover
+        refresh_token: str
+    else:
+        refresh_token: Mapped[str] = mapped_column(String(length=43), unique=True, nullable=False)
+
+
 class SQLAlchemyBaseAccessTokenTableUUID(SQLAlchemyBaseAccessTokenTable[uuid.UUID]):
     if TYPE_CHECKING:  # pragma: no cover
         user_id: uuid.UUID
@@ -34,12 +50,20 @@ class SQLAlchemyBaseAccessTokenTableUUID(SQLAlchemyBaseAccessTokenTable[uuid.UUI
 
         @declared_attr
         def user_id(cls) -> Mapped[GUID]:
-            return mapped_column(
-                GUID, ForeignKey("user.id", ondelete="cascade"), nullable=False
-            )
+            return mapped_column(GUID, ForeignKey("user.id", ondelete="cascade"), nullable=False)
 
 
-class SQLAlchemyAccessTokenDatabase(Generic[AP], AccessTokenDatabase[AP]):
+class SQLAlchemyBaseAccessRefreshTokenTableUUID(SQLAlchemyBaseAccessTokenTable[uuid.UUID], AccessRefreshTokenProtocol):
+    if TYPE_CHECKING:  # pragma: no cover
+        refresh_token: uuid.UUID
+    else:
+
+        @declared_attr
+        def refresh_token(cls) -> Mapped[GUID]:
+            return mapped_column(GUID, ForeignKey("user.id", ondelete="cascade"), nullable=False)
+
+
+class BaseSQLAlchemyAccessTokenDatabase(Generic[AP], BaseAccessTokenDatabase[str, AP]):
     """
     Access token database adapter for SQLAlchemy.
 
@@ -55,16 +79,10 @@ class SQLAlchemyAccessTokenDatabase(Generic[AP], AccessTokenDatabase[AP]):
         self.session = session
         self.access_token_table = access_token_table
 
-    async def get_by_token(
-        self, token: str, max_age: Optional[datetime] = None
-    ) -> Optional[AP]:
-        statement = select(self.access_token_table).where(
-            self.access_token_table.token == token  # type: ignore
-        )
+    async def get_by_token(self, token: str, max_age: Optional[datetime] = None) -> Optional[AP]:
+        statement = select(self.access_token_table).where(self.access_token_table.token == token)  # type: ignore
         if max_age is not None:
-            statement = statement.where(
-                self.access_token_table.created_at >= max_age  # type: ignore
-            )
+            statement = statement.where(self.access_token_table.created_at >= max_age)  # type: ignore
 
         results = await self.session.execute(statement)
         return results.scalar_one_or_none()
@@ -87,3 +105,33 @@ class SQLAlchemyAccessTokenDatabase(Generic[AP], AccessTokenDatabase[AP]):
     async def delete(self, access_token: AP) -> None:
         await self.session.delete(access_token)
         await self.session.commit()
+
+
+class SQLAlchemyAccessTokenDatabase(Generic[AP], BaseSQLAlchemyAccessTokenDatabase[AP], AccessTokenDatabase[AP]):
+    """
+    Access token database adapter for SQLAlchemy.
+    :param session: SQLAlchemy session.
+    """
+
+
+class SQLAlchemyAccessRefreshTokenDatabase(
+    Generic[APE], BaseSQLAlchemyAccessTokenDatabase[APE], AccessRefreshTokenDatabase[APE]
+):
+    """
+    Access token database adapter for SQLAlchemy.
+    :param session: SQLAlchemy session.
+    """
+
+    async def get_by_refresh_token(self, refresh_token: str, max_age: Optional[datetime] = None) -> Optional[APE]:
+        statement = select(self.access_token_table).where(
+            self.access_token_table.refresh_token == refresh_token  # type: ignore
+        )
+        if max_age is not None:
+            statement = statement.where(self.access_token_table.created_at >= max_age)  # type: ignore
+
+        results = await self.session.execute(statement)
+        access_token = results.scalar_one_or_none()
+        if access_token is None:
+            return None
+
+        return access_token
